@@ -1,0 +1,10 @@
+{
+  "repo": "jose",
+  "upstream": "panva/jose",
+  "parityBefore": "0%",
+  "parityAfter": "100%",
+  "upstreamCasesSynced": 55,
+  "gapsFound": 6,
+  "gapsClosed": 6,
+  "asOf": "2026-07-24"
+}
