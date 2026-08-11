@@ -1,6 +1,9 @@
 package jose
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Sentinel errors returned by the package. Callers may test for these using
 // errors.Is. Parsing, verification, and decryption errors are wrapped so that a
@@ -75,4 +78,36 @@ var (
 	// ErrDetachedPayload indicates a compact JWS carried no payload and the
 	// caller supplied none out of band. See VerifyOptions.DetachedPayload.
 	ErrDetachedPayload = errors.New("jose: payload is detached")
+)
+
+// More specific sentinels for the integrity and key-usage rules. Each one wraps
+// the broader category above, so a caller who tests for ErrInvalidHeader,
+// ErrInvalidCrit, or ErrInvalidKey keeps matching while a caller who wants to
+// know exactly which rule was broken can ask.
+var (
+	// ErrUnprotectedB64 indicates the RFC 7797 "b64" parameter appeared
+	// somewhere other than the protected header. "b64" decides how an
+	// authenticated octet string is interpreted, so RFC 7797 §6 requires it to
+	// be integrity protected; honouring an unprotected copy would let anyone
+	// holding a valid JWS change the payload the recipient sees.
+	ErrUnprotectedB64 = fmt.Errorf("%w: 'b64' must be integrity protected", ErrInvalidHeader)
+
+	// ErrUnprotectedCritical indicates a parameter named in "crit" was present
+	// only in an unprotected header. RFC 7515 §4.1.11 makes "crit" the
+	// producer's demand that the recipient honour a parameter; a demand
+	// satisfied by unauthenticated data is no demand at all.
+	ErrUnprotectedCritical = fmt.Errorf("%w: critical parameter is not integrity protected", ErrInvalidCrit)
+
+	// ErrKeyUseMismatch indicates a JWK's "use" (RFC 7517 §4.2) does not permit
+	// the operation, e.g. a "use":"enc" key offered for signing.
+	ErrKeyUseMismatch = fmt.Errorf("%w: JWK 'use' does not permit the operation", ErrInvalidKey)
+
+	// ErrKeyAlgMismatch indicates a JWK pinned to one algorithm by its "alg"
+	// (RFC 7517 §4.4) was used with another, which is how an algorithm
+	// downgrade goes unnoticed.
+	ErrKeyAlgMismatch = fmt.Errorf("%w: JWK 'alg' does not permit the algorithm", ErrInvalidKey)
+
+	// ErrKeyOpsMismatch indicates a JWK's "key_ops" (RFC 7517 §4.3) does not
+	// list the operation being attempted.
+	ErrKeyOpsMismatch = fmt.Errorf("%w: JWK 'key_ops' does not permit the operation", ErrInvalidKey)
 )

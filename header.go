@@ -115,7 +115,13 @@ func mergeHeaders(hs ...map[string]any) (map[string]any, error) {
 // a parameter the recipient understands and that is actually present in the
 // protected header. known holds the extension names the caller has declared as
 // understood.
-func checkCritical(protected, merged map[string]any, known []string) error {
+//
+// Both "crit" itself and the parameters it names are looked up in the protected
+// header alone. Accepting a name that is only present in an unprotected header
+// would let an attacker satisfy the producer's demand with data the signature or
+// authentication tag does not cover — and then change that data at will — which
+// is the opposite of what "crit" is for.
+func checkCritical(protected map[string]any, known []string) error {
 	crit, ok := Header(protected).Critical()
 	if _, present := protected["crit"]; present && !ok {
 		return fmt.Errorf("%w: 'crit' must be an array of strings", ErrInvalidCrit)
@@ -133,14 +139,35 @@ func checkCritical(protected, merged map[string]any, known []string) error {
 		if isRegisteredHeader(name) {
 			return fmt.Errorf("%w: 'crit' must not list the registered parameter %q", ErrInvalidCrit, name)
 		}
-		if _, present := merged[name]; !present {
-			return fmt.Errorf("%w: critical parameter %q is not present", ErrInvalidCrit, name)
+		if _, present := protected[name]; !present {
+			return fmt.Errorf("%w: %q is not in the protected header", ErrUnprotectedCritical, name)
 		}
 		if !containsString(known, name) {
 			return fmt.Errorf("%w: critical parameter %q is not understood", ErrInvalidCrit, name)
 		}
 	}
 	return nil
+}
+
+// checkCriticalProduced validates a "crit" header that this package is about to
+// emit. The declared names themselves are the understood set — a producer
+// understands every extension it chooses to mark critical — so this is exactly
+// the check a recipient performs, minus the part only a recipient can decide.
+//
+// It exists so that Sign, Encrypt, and EncryptJSONMulti never emit a document
+// Verify or Decrypt would reject: an empty "crit", a "crit" naming a registered
+// parameter, or a "crit" naming a parameter that is not actually present are all
+// fatal at verification time, and finding that out then means the token has
+// already been handed to a peer.
+func checkCriticalProduced(protected map[string]any) error {
+	if _, present := protected["crit"]; !present {
+		return nil
+	}
+	crit, ok := Header(protected).Critical()
+	if !ok {
+		return fmt.Errorf("%w: 'crit' must be an array of strings", ErrInvalidCrit)
+	}
+	return checkCritical(protected, crit)
 }
 
 // registeredHeaders are the JOSE header parameters defined by RFC 7515 and

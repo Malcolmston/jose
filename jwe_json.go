@@ -73,6 +73,22 @@ func EncryptJSONMulti(plaintext []byte, opts EncryptOptions, recipients ...Recip
 	if len(recipients) == 0 {
 		return nil, fmt.Errorf("%w: no recipients supplied", ErrInvalidKey)
 	}
+	// "zip" governs how the authenticated plaintext is post-processed, so it
+	// belongs in the protected header. Refusing here keeps this function from
+	// producing a document DecryptJSON would reject.
+	if _, ok := opts.Unprotected["zip"]; ok {
+		return nil, fmt.Errorf("%w: 'zip' must be in the protected header", ErrInvalidHeader)
+	}
+	for i, r := range recipients {
+		// A per-recipient "zip" is doubly wrong: the plaintext is compressed
+		// once for everybody, and DecryptJSON rejects an unprotected copy
+		// outright. Only the single-recipient path would have promoted it into
+		// the protected header, so refuse it uniformly rather than have it work
+		// for one recipient and produce an undecryptable document for two.
+		if _, ok := r.Header["zip"]; ok {
+			return nil, fmt.Errorf("recipient %d: %w: 'zip' must be in the protected header", i, ErrInvalidHeader)
+		}
+	}
 	encName := opts.Encryption
 	if encName == "" {
 		encName = A256GCM
@@ -114,6 +130,9 @@ func EncryptJSONMulti(plaintext []byte, opts EncryptOptions, recipients ...Recip
 		if err != nil {
 			return nil, fmt.Errorf("recipient %d: %w", i, err)
 		}
+		if err := checkJWKUsage(r.Key, r.KeyID, UseEnc, []string{alg, encName}, "encrypt", "wrapKey", "deriveKey"); err != nil {
+			return nil, fmt.Errorf("recipient %d: %w", i, err)
+		}
 		if km.derivesCEK() && len(recipients) > 1 {
 			return nil, fmt.Errorf("%w: %s cannot address %d recipients", ErrUnsupportedAlgorithm, alg, len(recipients))
 		}
@@ -132,6 +151,29 @@ func EncryptJSONMulti(plaintext []byte, opts EncryptOptions, recipients ...Recip
 			}
 		}
 
+		if len(recipients) == 1 {
+			// With a single recipient nothing has to stay per-recipient, so the
+			// algorithm reads its inputs from and writes its outputs into one
+			// header — exactly as the compact serialization does. Folding the
+			// protected parameters in *before* the key operation is what makes
+			// a caller-supplied algorithm input reachable at all; merging the
+			// two maps afterwards instead mistook the algorithm's own echo of
+			// that input for a repeated parameter, so EncryptJSON failed
+			// outright on an explicit PBES2 "p2s"/"p2c" or AESGCMKW "iv" that
+			// Encrypt accepts.
+			for k, v := range protected {
+				if _, dup := rh[k]; dup {
+					// A "kid" in both places is not a conflict: the
+					// recipient's own key ID wins, as it always has.
+					if k != "kid" {
+						return nil, fmt.Errorf("%w: header parameter %q is repeated", ErrInvalidHeader, k)
+					}
+					continue
+				}
+				rh[k] = v
+			}
+		}
+
 		newCek, encryptedKey, err := km.encryptKey(enc, resolved, rh, cek)
 		if err != nil {
 			return nil, fmt.Errorf("recipient %d: %w", i, err)
@@ -139,21 +181,29 @@ func EncryptJSONMulti(plaintext []byte, opts EncryptOptions, recipients ...Recip
 		cek = newCek
 
 		if len(recipients) == 1 {
-			// With a single recipient every parameter that does not need to
-			// be per-recipient belongs in the protected header, where it is
+			// Every parameter belongs in the protected header, where it is
 			// covered by the authentication tag.
-			for k, v := range rh {
-				if _, dup := protected[k]; dup && k != "kid" {
-					return nil, fmt.Errorf("%w: header parameter %q is repeated", ErrInvalidHeader, k)
-				}
-				protected[k] = v
-			}
+			protected = rh
 			out.Recipients = append(out.Recipients, jweRecipient{EncryptedKey: EncodeSegment(encryptedKey)})
 		} else {
 			out.Recipients = append(out.Recipients, jweRecipient{
 				Header:       rh,
 				EncryptedKey: EncodeSegment(encryptedKey),
 			})
+		}
+	}
+
+	// The document must be one DecryptJSON would accept: checkCriticalProduced
+	// applies the same "crit" rules the recipient will, and mergeHeaders rejects
+	// a parameter repeated across the protected, shared unprotected, and
+	// per-recipient headers. Both are checked there, so a document that fails
+	// either is one this package can emit but never read.
+	if err := checkCriticalProduced(protected); err != nil {
+		return nil, err
+	}
+	for i := range out.Recipients {
+		if _, err := mergeHeaders(protected, out.Unprotected, out.Recipients[i].Header); err != nil {
+			return nil, fmt.Errorf("recipient %d: %w", i, err)
 		}
 	}
 
@@ -249,12 +299,24 @@ func DecryptJSONWithOptions(data []byte, key any, opts DecryptOptions) (plaintex
 	lastErr := error(ErrDecryptFailed)
 	for _, i := range order {
 		r := recipients[i]
+		// "zip" decides how the authenticated plaintext is post-processed, so
+		// an unprotected copy would let an attacker turn a decrypted message
+		// into whatever that octet string happens to inflate to. RFC 7516
+		// §4.1.3 puts it in the protected header; require that.
+		if _, ok := doc.Unprotected["zip"]; ok {
+			lastErr = fmt.Errorf("%w: 'zip' must be in the protected header", ErrInvalidHeader)
+			continue
+		}
+		if _, ok := r.Header["zip"]; ok {
+			lastErr = fmt.Errorf("%w: 'zip' must be in the protected header", ErrInvalidHeader)
+			continue
+		}
 		merged, err := mergeHeaders(protected, doc.Unprotected, r.Header)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		if err := checkCritical(protected, merged, opts.KnownCritical); err != nil {
+		if err := checkCritical(protected, opts.KnownCritical); err != nil {
 			lastErr = err
 			continue
 		}
@@ -295,6 +357,9 @@ func decryptOne(header map[string]any, encryptedKey, iv, ciphertext, tag, aad []
 	}
 	enc, err := lookupEnc(encName)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkJWKUsage(key, Header(header).KeyID(), UseEnc, []string{alg, encName}, "decrypt", "unwrapKey", "deriveKey"); err != nil {
 		return nil, err
 	}
 	resolved, err := resolveKey(key, Header(header).KeyID())

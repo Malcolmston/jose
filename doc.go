@@ -105,9 +105,30 @@
 // invalid padding — reports the same ErrDecryptFailed, so the API cannot be
 // used as a padding oracle.
 //
+// A zero-length symmetric secret is refused by both Sign and Verify. HMAC keyed
+// with no octets is a public function, so a comparison against it succeeds for
+// anyone; a secret that resolves to nothing must fail closed, not open.
+//
+// Header parameters that decide how an authenticated octet string is
+// interpreted — "b64" (RFC 7797) and "zip" (RFC 7516 §4.1.3) — are honoured only
+// from the protected header, and "b64" must additionally appear in "crit".
+// Neither enters the signing input or the authentication tag, so an
+// unprotected copy would change the payload a caller receives without
+// disturbing the signature.
+//
+// Base64url decoding is strict: padding, the standard alphabet's '+' and '/',
+// embedded whitespace, and a final quantum with non-zero unused bits are all
+// rejected, so every value has exactly one spelling and the serialized token is
+// not malleable.
+//
+// A JWK's "use", "key_ops", and "alg" members are enforced (RFC 7517 §4.2–§4.4),
+// so a key published for one purpose cannot be used for another.
+//
 // A "crit" header naming an extension the caller has not declared as understood
-// causes rejection, as RFC 7515 §4.1.11 requires. "zip":"DEF" payloads inflate
-// under a cap of MaxDecompressedSize, which refuses DEFLATE bombs. The PBES2
+// causes rejection, as RFC 7515 §4.1.11 requires, and a name it lists is
+// satisfied only by a parameter in the protected header: a critical requirement
+// met by unauthenticated data is no requirement at all. "zip":"DEF" payloads
+// inflate under a cap of MaxDecompressedSize, which refuses DEFLATE bombs. The PBES2
 // "p2c" iteration count is attacker-supplied, so it is bounded by
 // MinPBES2Count and MaxPBES2Count before any key derivation is attempted.
 //
@@ -115,4 +136,8 @@
 //
 // All errors are wrapped sentinels; test them with errors.Is, e.g.
 // errors.Is(err, jose.ErrDecryptFailed) or errors.Is(err, jose.ErrInvalidCrit).
+// The narrower sentinels — ErrUnprotectedB64, ErrUnprotectedCritical,
+// ErrKeyUseMismatch, ErrKeyAlgMismatch, ErrKeyOpsMismatch — each wrap one of the
+// broad categories, so testing for the category still matches while a caller
+// who wants to know which rule was broken can ask.
 package jose

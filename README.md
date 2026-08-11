@@ -267,11 +267,14 @@ outside it:
    padding spaces inside the header JSON — the byte comparison is skipped and
    logged, since no re-serializer can reproduce those octets either.
 
-Two defects in the upstream fixtures are worked around rather than silently
-absorbed, both documented in `testdata/UPSTREAM.md`: the RFC 7520 §5.13
-fixture's `input.enc` reads `A128CBC-H256` (contradicted by its own protected
-header), and the RFC 7797 compact fixture's `signing.protected_b64u` decodes to
-invalid JSON. The vendored files are kept byte-verbatim at the pinned commit.
+Defects in the upstream fixtures are handled explicitly rather than silently
+absorbed, all documented in `testdata/UPSTREAM.md`. The RFC 7520 §5.13 fixture's
+`input.enc` reads `A128CBC-H256` (contradicted by its own protected header) and
+is corrected by the harness, with the vendored file kept byte-verbatim at the
+pinned commit. Both RFC 7797 fixtures carried headers that contradict RFC 7797
+§3 — a `"b64"` that is not listed in `"crit"` — and have been corrected in place
+to the values RFC 7797 §4.2 publishes, whose signatures were recomputed from the
+RFC's key and match.
 
 Previously-closed gaps are tracked in `parity.json` (`gapsFound: 6`,
 `gapsClosed: 6`) — all six were the JWE JSON serialization being unreachable
@@ -302,7 +305,43 @@ before `DecryptJSON` existed.
   `MaxPBES2Count` (1 000 000), defaulting to `DefaultPBES2Count` (100 000) when
   encrypting.
 - **`crit` handling.** Critical header parameters the caller has not declared as
-  understood are rejected (`ErrInvalidCrit`), per RFC 7515 §4.1.11.
+  understood are rejected (`ErrInvalidCrit`), per RFC 7515 §4.1.11. A name
+  listed in `crit` is satisfied only by a parameter present in the *protected*
+  header (`ErrUnprotectedCritical`): `crit` is the producer's demand that the
+  recipient honour a parameter, and a demand an attacker's own unprotected
+  header can satisfy is no demand at all.
+- **Unauthenticated headers cannot steer interpretation.** A JOSE header
+  parameter that changes how an authenticated octet string is *read* is only
+  honoured from the protected header. Two parameters have this property, and
+  both are read from the protected header alone:
+  - `b64` (RFC 7797). It decides whether `Verify` base64url-decodes the payload
+    segment before returning it, but it does not enter the signing input — so a
+    `"b64":false` grafted onto a per-signature unprotected header would change
+    the payload the caller receives while the signature still verified. It must
+    also be listed in `crit`, per RFC 7797 §3.
+  - `zip` (RFC 7516 §4.1.3). It decides whether the decrypted plaintext is
+    inflated, so an unprotected copy would turn a decrypted message into
+    whatever its octets happen to expand to.
+- **Empty keys are not weak keys, they are no key at all.** HMAC keyed with zero
+  octets is a public function: anyone can compute a tag that a constant-time
+  comparison accepts. Both signing *and* verification reject a zero-length
+  symmetric secret with `ErrInvalidKey`, so a secret that resolves to nothing —
+  an unset environment variable, a truncated config value — fails closed instead
+  of accepting every token. An absent signature segment is likewise rejected
+  before it reaches any primitive.
+- **Canonical base64url.** `DecodeSegment` is strict: padding, the standard
+  alphabet's `+` and `/`, embedded whitespace or newlines, and a final quantum
+  with non-zero unused bits are all rejected. Every value therefore has exactly
+  one spelling. A lenient decoder makes the *token string* malleable — the four
+  spare bits at the end of a 64-octet ECDSA signature give sixteen distinct
+  tokens that all verify — which breaks anything keying a replay cache, audit
+  log, or revocation list on the serialized token.
+- **JWKs are held to what they declare.** A JWK's `use`, `key_ops`, and `alg`
+  members are enforced on every operation (RFC 7517 §4.2–§4.4), so a key
+  published for verification cannot be pressed into service for encryption, and
+  a key that names one algorithm cannot be used with another. A mismatch is
+  `ErrKeyUseMismatch`, `ErrKeyAlgMismatch`, or `ErrKeyOpsMismatch`, each of which
+  matches `ErrInvalidKey`. Keys that state no restriction are unaffected.
 - **`RSA1_5` is supported but discouraged.** It is present only because RFC 7520
   §5.1 and RFC 7516 A.2 use it and interop with old deployments requires it. It
   is vulnerable to Bleichenbacher-style adaptive chosen-ciphertext attacks and

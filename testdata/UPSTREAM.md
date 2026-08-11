@@ -194,10 +194,23 @@ base64url-encoded, and `"b64"` must appear in `"crit"` — so these vectors also
 exercise critical-header handling, and are driven through
 `VerifyWithOptions`/`VerifyJSONWithOptions` with `KnownCritical: ["b64"]`.
 
-Note: `b64_false_compact.json` contains a second upstream defect — its
-`signing.protected_b64u` (`...ImI2NCI6LCJjcml0...`) decodes to invalid JSON with
-the `false` literal missing. The harness does not read that member; it verifies
-`output.compact` and `output.json`, whose protected headers are well-formed.
+### Corrections applied to the vendored `rfc7797/` fixtures
+
+Both files arrived with headers that contradict RFC 7797 §3, which requires
+`"b64"` to be listed in `"crit"`. They have been corrected in place to the
+values RFC 7797 §4.2 publishes; the RFC's own signatures were recomputed from
+its key and match, so the corrected files are authentic RFC data rather than a
+local invention.
+
+| File | Defect as vendored | Correction |
+| --- | --- | --- |
+| `b64_false_compact.json` | `signing.protected_b64u` was `...ImI2NCI6LCJjcml0...`, which decodes to invalid JSON with the `false` literal missing. Its `signing.sig` belonged to the other fixture. | Both members replaced with the values already used, correctly, by `output.compact` and `output.json`. |
+| `b64_false_json_only.json` | `output`'s protected header decoded to `{"alg":"HS256","b64":false}` — no `"crit"` — even though `signing.protected` claimed `crit:["b64"]`. | Replaced with RFC 7797 §4.2's `eyJhbGciOiJIUzI1NiIsImI2NCI6ZmFsc2UsImNyaXQiOlsiYjY0Il19` and its signature `A5dxf2s96_n5FLueVuW1Z_vh161FwXZC4YLPff6dmDY`. |
+
+The second defect mattered: a `"b64"` that is not in `"crit"` is one a recipient
+is free to ignore, which is exactly the payload-substitution hazard RFC 7797 §6
+warns about. This package rejects such a header, so the fixture had to be
+corrected rather than accommodated.
 
 ---
 

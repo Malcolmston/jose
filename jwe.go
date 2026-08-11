@@ -116,6 +116,9 @@ func Encrypt(plaintext []byte, key any, opts EncryptOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := checkJWKUsage(key, opts.KeyID, UseEnc, []string{alg, encName}, "encrypt", "wrapKey", "deriveKey"); err != nil {
+		return "", err
+	}
 
 	header := copyHeader(opts.Header, opts.AdditionalHeaders)
 	header["alg"] = alg
@@ -129,6 +132,11 @@ func Encrypt(plaintext []byte, key any, opts EncryptOptions) (string, error) {
 	}
 	if opts.Compress {
 		header["zip"] = "DEF"
+	}
+	// The compact serialization has no unprotected header, so the protected
+	// header is the whole merged view a recipient sees.
+	if err := checkCriticalProduced(header); err != nil {
+		return "", err
 	}
 
 	cek, encryptedKey, err := km.encryptKey(enc, resolved, header, nil)
@@ -186,7 +194,7 @@ func DecryptWithOptions(token string, key any, opts DecryptOptions) (plaintext [
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := checkCritical(protected, protected, opts.KnownCritical); err != nil {
+	if err := checkCritical(protected, opts.KnownCritical); err != nil {
 		return nil, nil, err
 	}
 

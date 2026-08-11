@@ -183,7 +183,18 @@ func VerifyJSONWithOptions(data []byte, key any, opts VerifyOptions) (payload []
 		return nil, nil, fmt.Errorf("%w: %v", ErrMalformed, err)
 	}
 	sigs := doc.Signatures
-	if doc.Signature != "" {
+	flattened := doc.Signature != "" || doc.Protected != "" || doc.Header != nil
+	if len(sigs) > 0 && flattened {
+		// RFC 7515 §7.2.2: the flattened syntax carries its members at the top
+		// level *instead of* "signatures". A document holding both is
+		// ambiguous, and accepting it lets an attacker graft an unauthenticated
+		// top-level header onto a genuine multi-signature document.
+		return nil, nil, fmt.Errorf("%w: a JWS cannot mix the general and flattened forms", ErrMalformed)
+	}
+	if flattened {
+		if doc.Signature == "" {
+			return nil, nil, fmt.Errorf("%w: flattened JWS has no 'signature'", ErrMalformed)
+		}
 		sigs = append(sigs, jwsSignature{
 			Protected: doc.Protected,
 			Header:    doc.Header,
@@ -240,6 +251,9 @@ func signOne(payload []byte, key any, opts SignOptions) (protectedB64, sigB64, e
 	if err != nil {
 		return "", "", "", err
 	}
+	if err := checkJWKUsage(key, opts.KeyID, UseSig, []string{alg}, "sign"); err != nil {
+		return "", "", "", err
+	}
 
 	protected := copyHeader(opts.Header)
 	protected["alg"] = alg
@@ -259,6 +273,12 @@ func signOne(payload []byte, key any, opts SignOptions) (protectedB64, sigB64, e
 		protected["crit"] = opts.Critical
 	}
 
+	// RFC 7797 §6: "b64" must be integrity protected, so it may not be placed
+	// in the unprotected header. Refusing here keeps Sign from producing a
+	// document that Verify would reject.
+	if _, inUnprotected := opts.Unprotected["b64"]; inUnprotected {
+		return "", "", "", ErrUnprotectedB64
+	}
 	b64 := true
 	if v, present := protected["b64"]; present {
 		flag, ok := v.(bool)
@@ -270,14 +290,18 @@ func signOne(payload []byte, key any, opts SignOptions) (protectedB64, sigB64, e
 			return "", "", "", fmt.Errorf("%w: 'b64' must be listed in 'crit' when false", ErrInvalidCrit)
 		}
 	}
-	if len(opts.Critical) > 0 {
-		merged, err := mergeHeaders(protected, opts.Unprotected)
-		if err != nil {
-			return "", "", "", err
-		}
-		if err := checkCritical(protected, merged, opts.Critical); err != nil {
-			return "", "", "", err
-		}
+	// Validate the header exactly as a recipient will. mergeHeaders rejects a
+	// parameter that appears in both halves, which verifySignature also does, so
+	// a caller who repeats one hears about it here instead of shipping a JWS
+	// nothing can verify; checkCriticalProduced does the same for "crit" —
+	// including a "crit" the caller placed in Header directly rather than in
+	// Critical, and a critical parameter the caller left in Unprotected, where
+	// no signature covers it.
+	if _, err := mergeHeaders(protected, opts.Unprotected); err != nil {
+		return "", "", "", err
+	}
+	if err := checkCriticalProduced(protected); err != nil {
+		return "", "", "", err
 	}
 
 	protectedB64, err = encodeHeader(protected)
@@ -319,17 +343,32 @@ func verifySignature(protectedSeg string, protected, unprotected map[string]any,
 		return nil, fmt.Errorf("%w: alg %q is not accepted", ErrSignatureInvalid, alg)
 	}
 	known := append([]string{"b64"}, opts.KnownCritical...)
-	if err := checkCritical(protected, merged, known); err != nil {
+	if err := checkCritical(protected, known); err != nil {
 		return nil, err
 	}
 
+	// RFC 7797 §6: "b64" MUST be integrity protected, and it MUST be listed in
+	// "crit". Reading it from the merged view would let an attacker append an
+	// unprotected {"b64":false} to a JWS JSON document and change the payload
+	// this function returns — from the decoded octets to the base64url text —
+	// while the signature still verifies. It is therefore read from the
+	// protected header only, and its presence anywhere else is rejected.
+	if _, inUnprotected := unprotected["b64"]; inUnprotected {
+		return nil, ErrUnprotectedB64
+	}
 	b64 := true
-	if v, present := merged["b64"]; present {
+	if v, present := protected["b64"]; present {
 		flag, ok := v.(bool)
 		if !ok {
 			return nil, fmt.Errorf("%w: 'b64' must be a boolean", ErrInvalidHeader)
 		}
 		b64 = flag
+		if !b64 {
+			crit, _ := Header(protected).Critical()
+			if !containsString(crit, "b64") {
+				return nil, fmt.Errorf("%w: 'b64' must be listed in 'crit' when false", ErrInvalidCrit)
+			}
+		}
 	}
 
 	if payloadSeg == "" {
@@ -347,9 +386,17 @@ func verifySignature(protectedSeg string, protected, unprotected map[string]any,
 	if err != nil {
 		return nil, err
 	}
+	if err := checkJWKUsage(key, Header(merged).KeyID(), UseSig, []string{alg}, "verify"); err != nil {
+		return nil, err
+	}
 	resolved, err := resolveKey(key, Header(merged).KeyID())
 	if err != nil {
 		return nil, err
+	}
+	// An absent signature must never reach the primitives, where "no signature"
+	// could be mistaken for "nothing to compare".
+	if sigSeg == "" {
+		return nil, fmt.Errorf("%w: signature is empty", ErrSignatureInvalid)
 	}
 	sig, err := DecodeSegment(sigSeg)
 	if err != nil {

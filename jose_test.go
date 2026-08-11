@@ -957,9 +957,11 @@ func TestBase64Segments(t *testing.T) {
 	if b, err := DecodeSegment("-_8"); err != nil || !bytes.Equal(b, []byte{0xFB, 0xFF}) {
 		t.Errorf("DecodeSegment = %x, %v", b, err)
 	}
-	// Padded input is tolerated for robustness.
-	if b, err := DecodeSegment("-_8="); err != nil || !bytes.Equal(b, []byte{0xFB, 0xFF}) {
-		t.Errorf("padded DecodeSegment = %x, %v", b, err)
+	// RFC 7515 §2 requires every base64url value to be unpadded, and a decoder
+	// that accepts more than one spelling of the same octets makes the token
+	// string malleable. Padding is therefore rejected, not tolerated.
+	if _, err := DecodeSegment("-_8="); err == nil {
+		t.Error("expected an error for padded base64url")
 	}
 	if _, err := DecodeSegment("!!!"); err == nil {
 		t.Error("expected an error for invalid base64url")

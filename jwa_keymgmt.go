@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"math"
 	"sort"
 )
 
@@ -409,8 +410,12 @@ func (km keyMgmt) encryptKeyPBES2(key any, header map[string]any, cek []byte) (_
 			return nil, nil, err
 		}
 	}
-	if len(salt) < 8 {
-		return nil, nil, fmt.Errorf("%w: 'p2s' must be at least 8 octets", ErrInvalidHeader)
+	// The same bounds decryptKeyPBES2 enforces. RFC 7518 §4.8.1.1 sets the
+	// 8-octet floor; MaxPBES2SaltInput is this package's ceiling, and a caller
+	// who supplies a larger "p2s" must be told here rather than handed a token
+	// that no recipient — including this package — will ever unwrap.
+	if len(salt) < 8 || len(salt) > MaxPBES2SaltInput {
+		return nil, nil, fmt.Errorf("%w: 'p2s' length %d is out of range [8,%d]", ErrInvalidHeader, len(salt), MaxPBES2SaltInput)
 	}
 	header["p2s"] = EncodeSegment(salt)
 	header["p2c"] = count
@@ -565,7 +570,10 @@ func headerBytesOptional(header map[string]any, name string) ([]byte, error) {
 func headerInt(raw any) (int, error) {
 	switch v := raw.(type) {
 	case float64:
-		if v != float64(int(v)) {
+		// Range-check before converting: Go leaves a float-to-int conversion
+		// implementation-defined when the value does not fit, so an
+		// attacker-supplied 1e300 must never reach int().
+		if v < math.MinInt32 || v > math.MaxInt32 || v != math.Trunc(v) {
 			return 0, fmt.Errorf("%w: expected an integer header value", ErrInvalidHeader)
 		}
 		return int(v), nil

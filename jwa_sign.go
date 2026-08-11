@@ -176,6 +176,15 @@ func (a sigAlg) verify(input, sig []byte, key any) error {
 		if !ok {
 			return fmt.Errorf("%w: %s requires []byte, got %T", ErrInvalidKeyType, a.name, key)
 		}
+		// An empty secret is not a weak key, it is no key at all: HMAC with a
+		// zero-length key is a public function, so anyone can forge a tag that
+		// hmac.Equal accepts. sign already refuses to produce one; verify must
+		// refuse to accept one, or a caller whose secret came back empty (an
+		// unset environment variable, a truncated config value) fails open on
+		// every token.
+		if len(secret) == 0 {
+			return fmt.Errorf("%w: %s secret is empty", ErrInvalidKey, a.name)
+		}
 		mac := hmac.New(a.hash.New, secret)
 		mac.Write(input)
 		if !hmac.Equal(sig, mac.Sum(nil)) {

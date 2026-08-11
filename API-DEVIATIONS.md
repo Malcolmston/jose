@@ -93,6 +93,19 @@ alongside the contract's fields. Both are meaningless in the compact
 serialization — `Encrypt` rejects them — and both are required by RFC 7520
 §5.10 and §5.11.
 
+### Error sentinels for the integrity and key-usage rules
+
+```go
+var ErrUnprotectedB64, ErrUnprotectedCritical error       // wrap ErrInvalidHeader / ErrInvalidCrit
+var ErrKeyUseMismatch, ErrKeyAlgMismatch, ErrKeyOpsMismatch error // wrap ErrInvalidKey
+```
+
+The contract names the broad categories only. These five say *which* rule was
+broken, which a caller needs in order to tell "this key is not for this
+operation" (a configuration error) apart from "this key does not decode" (a
+data error). Each wraps its category, so `errors.Is` against the category is
+unaffected.
+
 ### JWK helper
 
 `JWK.IsPrivate() bool`, used internally to reject an `epk` header that smuggles
@@ -116,6 +129,57 @@ primitives. It is implemented in both directions. Decryption uses
 `rsa.DecryptPKCS1v15SessionKey` with a fixed-length session key so that invalid
 padding is indistinguishable from a wrong key, and the doc comment marks the
 algorithm as legacy.
+
+### `b64` and `zip` are read from the protected header only
+
+RFC 7515 §7.2 allows most header parameters in either the protected or the
+unprotected header. Two are treated as protected-only here, because both decide
+how an *authenticated* octet string is interpreted rather than what it is:
+
+- `b64` (RFC 7797) selects whether `Verify` base64url-decodes the payload
+  segment before returning it. It does not enter the signing input, so honouring
+  an unprotected copy would let anyone change the payload a caller receives
+  while the signature still verified. RFC 7797 §6 requires it to be integrity
+  protected; §3 additionally requires it in `crit`, which is now enforced on
+  verification as well as on signing.
+- `zip` (RFC 7516 §4.1.3) selects whether the decrypted plaintext is inflated.
+
+A `b64` or `zip` in a shared unprotected or per-recipient header is rejected
+with `ErrUnprotectedB64` / `ErrInvalidHeader` rather than ignored, so the
+disagreement is visible.
+
+### `crit` is satisfied only from the protected header
+
+RFC 7515 §4.1.11 makes `crit` the producer's demand that the recipient honour a
+parameter. A demand that an *unprotected* copy of that parameter can satisfy is
+no demand at all: the attacker supplies both the value and the proof that it was
+required. Both `crit` itself and every parameter it names are therefore looked
+up in the protected header alone, on production as well as on verification, and
+a critical parameter found only in an unprotected header is
+`ErrUnprotectedCritical` (which matches `ErrInvalidCrit`).
+
+### `DecodeSegment` is strict
+
+RFC 7515 §2 defines the encoding as base64url with all trailing `=` omitted.
+`DecodeSegment` holds to exactly that: padding, `+`/`/`, embedded whitespace or
+newlines (which `encoding/base64` would otherwise skip), and a final quantum
+with non-zero unused bits are all errors. An earlier revision fell back to the
+padded decoder "for robustness"; that made a single value reachable by several
+spellings, which makes the serialized token malleable even though the decoded
+signature is unchanged.
+
+### JWK `use`, `key_ops`, and `alg` are enforced
+
+RFC 7517 §4.2–§4.4 let a key state what it is for. Those statements are checked
+before every sign, verify, encrypt, and decrypt, and a mismatch is
+`ErrKeyUseMismatch`, `ErrKeyAlgMismatch`, or `ErrKeyOpsMismatch` — each of which
+matches `ErrInvalidKey`, so a caller testing for the category keeps working. A
+key that sets none of the three is unrestricted, as before.
+
+Because a JWE key legitimately names either its key management `alg` or its
+content encryption `enc` in the `alg` member — RFC 7520 §5.6 publishes an `oct`
+key with `"alg":"A128GCM"` used with `"alg":"dir"` — either satisfies the check
+on the JWE side. On the JWS side `alg` is unambiguous and must match exactly.
 
 ### `none` has no opt-in
 

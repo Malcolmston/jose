@@ -266,6 +266,72 @@ func FromKey(key any) (*JWK, error) {
 	}
 }
 
+// JWK "use" values (RFC 7517 §4.2).
+const (
+	// UseSig marks a key intended for signing and verification.
+	UseSig = "sig"
+	// UseEnc marks a key intended for encryption and key management.
+	UseEnc = "enc"
+)
+
+// selectJWK returns the *JWK that resolveKey would resolve for kid, or nil when
+// key is not a JWK or JWK Set. It mirrors resolveKey's selection exactly, so the
+// key whose restrictions are checked is the key that is actually used.
+func selectJWK(key any, kid string) *JWK {
+	switch k := key.(type) {
+	case *JWK:
+		return k
+	case *JWKSet:
+		if k == nil {
+			return nil
+		}
+		if kid == "" && len(k.Keys) == 1 {
+			return k.Keys[0]
+		}
+		if j, ok := k.LookupKeyID(kid); ok {
+			return j
+		}
+	}
+	return nil
+}
+
+// checkJWKUsage enforces the restrictions a JWK places on itself: "use"
+// (RFC 7517 §4.2), "key_ops" (§4.3), and "alg" (§4.4). A key that says what it
+// is for must not be silently used for anything else — that is what stops a
+// verification key published for one algorithm from being pressed into service
+// for another.
+//
+// kid selects the key from a JWK Set. use is the required "use" value, algs
+// lists the algorithm identifiers that satisfy "alg" (a JWE key may legitimately
+// name either its key management "alg" or its content encryption "enc"), and ops
+// lists the "key_ops" values any one of which permits the operation. Keys that
+// are not JWKs, and JWKs that state no restriction, are accepted.
+func checkJWKUsage(key any, kid, use string, algs []string, ops ...string) error {
+	j := selectJWK(key, kid)
+	if j == nil {
+		return nil
+	}
+	if j.Use != "" && j.Use != use {
+		return fmt.Errorf("%w: key states %q, the operation requires %q", ErrKeyUseMismatch, j.Use, use)
+	}
+	if j.Alg != "" && !containsString(algs, j.Alg) {
+		return fmt.Errorf("%w: key states %q, the operation uses %q", ErrKeyAlgMismatch, j.Alg, algs[0])
+	}
+	if len(j.KeyOps) > 0 {
+		permitted := false
+		for _, op := range ops {
+			if containsString(j.KeyOps, op) {
+				permitted = true
+				break
+			}
+		}
+		if !permitted {
+			return fmt.Errorf("%w: key permits %v, the operation requires one of %v", ErrKeyOpsMismatch, j.KeyOps, ops)
+		}
+	}
+	return nil
+}
+
 // --- resolution helpers ---
 
 // b64Field decodes a required base64url JWK parameter.
